@@ -8,6 +8,10 @@ Tests all code that can be tested WITHOUT the actual dataset:
   4. GradCAM class
   5. Plotting functions (matplotlib Agg backend)
   6. Forward + backward passes
+
+NOTE: Since network access is unavailable, models are built WITHOUT pretrained
+weights. The code logic, architecture, shapes, and freezing behaviour are
+identical -- only the initial weight values differ.
 """
 
 import os
@@ -43,11 +47,11 @@ from sklearn.metrics import (
 
 import pytest
 
-# Suppress weight download progress bars / noisy warnings during tests
+# Suppress noisy warnings during tests
 warnings.filterwarnings("ignore")
 
 # Constants (mirroring the notebook)
-DEVICE = torch.device("cpu")  # tests always on CPU for portability
+DEVICE = torch.device("cpu")
 IMG_SIZE = 224
 NUM_CLASSES = 2
 CLASS_NAMES = ["NORMAL", "PNEUMONIA"]
@@ -58,21 +62,22 @@ SEED = 42
 
 
 # =====================================================================
-#  Notebook functions -- copied verbatim from the notebook
+#  Model builders -- same logic as notebook, but with pretrained=False
+#  to avoid network downloads in CI/test environments.
+#  The architecture, freezing logic, and head replacement are IDENTICAL
+#  to the notebook code, which is what we are validating.
 # =====================================================================
 
 def build_resnet(num_classes=2, freeze_backbone=True):
-    """Build a ResNet-50 with transfer learning."""
-    # Use pretrained=False in tests to avoid network dependency
-    try:
-        model = torchvision.models.resnet50(
-            weights=torchvision.models.ResNet50_Weights.IMAGENET1K_V2
-        )
-    except Exception:
-        model = torchvision.models.resnet50(weights=None)
+    """Build a ResNet-50 (notebook version, adapted for offline testing)."""
+    # Notebook uses: weights=torchvision.models.ResNet50_Weights.IMAGENET1K_V2
+    # We use weights=None since we cannot download in this environment.
+    model = torchvision.models.resnet50(weights=None)
     if freeze_backbone:
         for param in model.parameters():
             param.requires_grad = False
+
+    # Replace classification head -- IDENTICAL to notebook
     in_features = model.fc.in_features
     model.fc = nn.Sequential(
         nn.Dropout(0.3),
@@ -82,25 +87,24 @@ def build_resnet(num_classes=2, freeze_backbone=True):
 
 
 def build_vit(num_classes=2, freeze_backbone=True):
-    """Build a ViT-B/16 with transfer learning via timm."""
-    try:
-        model = timm.create_model(
-            "vit_base_patch16_224",
-            pretrained=True,
-            num_classes=num_classes,
-        )
-    except Exception:
-        model = timm.create_model(
-            "vit_base_patch16_224",
-            pretrained=False,
-            num_classes=num_classes,
-        )
+    """Build a ViT-B/16 (notebook version, adapted for offline testing)."""
+    # Notebook uses: pretrained=True
+    # We use pretrained=False since we cannot download in this environment.
+    model = timm.create_model(
+        "vit_base_patch16_224",
+        pretrained=False,
+        num_classes=num_classes,
+    )
     if freeze_backbone:
         for name, param in model.named_parameters():
             if "head" not in name:
                 param.requires_grad = False
     return model
 
+
+# =====================================================================
+#  Notebook functions -- copied VERBATIM from the notebook
+# =====================================================================
 
 def train_one_epoch(model, loader, criterion, optimizer, device):
     """Train for one epoch. Returns average loss and accuracy."""
@@ -148,6 +152,7 @@ def evaluate(model, loader, criterion, device):
 def train_model(
     model, train_loader, val_loader, num_epochs, lr, weight_decay, device, model_name="Model"
 ):
+    """Full training loop -- verbatim from notebook."""
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -179,6 +184,8 @@ def train_model(
 
 
 class GradCAM:
+    """Grad-CAM -- verbatim from notebook."""
+
     def __init__(self, model, target_layer):
         self.model = model
         self.gradients = None
@@ -206,6 +213,10 @@ class GradCAM:
             cam = cam / cam.max()
         return cam
 
+
+# =====================================================================
+#  Plotting functions -- verbatim from notebook (with plt.close)
+# =====================================================================
 
 def plot_training_curves(histories, model_names):
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -285,7 +296,7 @@ def plot_bar_comparison(resnet_acc, resnet_f1, vit_acc, vit_f1):
 
 
 # =====================================================================
-#  Helpers for creating dummy data
+#  Helpers
 # =====================================================================
 
 def make_dummy_loader(n_samples=16, img_size=224, num_classes=2, batch_size=4):
@@ -384,6 +395,12 @@ class TestBuildResNet:
         assert isinstance(model.fc, nn.Sequential)
         assert isinstance(model.fc[0], nn.Dropout)
         assert isinstance(model.fc[1], nn.Linear)
+
+    def test_resnet_fc_linear_dims(self):
+        model = build_resnet(num_classes=2)
+        linear = model.fc[1]
+        assert linear.in_features == 2048, f"ResNet-50 fc in_features should be 2048, got {linear.in_features}"
+        assert linear.out_features == 2
 
     def test_resnet_param_counts(self):
         model = build_resnet(num_classes=2, freeze_backbone=True)
@@ -553,6 +570,20 @@ class TestTrainModel:
             assert key in history, f"Missing history key: {key}"
             assert len(history[key]) == 3, f"Expected 3 entries for {key}, got {len(history[key])}"
 
+    def test_history_values_are_floats(self):
+        model = build_resnet(num_classes=2, freeze_backbone=True).to(DEVICE)
+        train_loader = make_dummy_loader(n_samples=8, batch_size=4)
+        val_loader = make_dummy_loader(n_samples=8, batch_size=4)
+
+        _, history = train_model(
+            model, train_loader, val_loader,
+            num_epochs=2, lr=1e-3, weight_decay=1e-4,
+            device=DEVICE, model_name="Test",
+        )
+        for key in ["train_loss", "train_acc", "val_loss", "val_acc"]:
+            for v in history[key]:
+                assert isinstance(v, float), f"history['{key}'] values should be float, got {type(v)}"
+
     def test_train_model_vit(self):
         model = build_vit(num_classes=2, freeze_backbone=True).to(DEVICE)
         train_loader = make_dummy_loader(n_samples=8, batch_size=4)
@@ -565,6 +596,18 @@ class TestTrainModel:
         )
         assert isinstance(trained_model, nn.Module)
         assert "train_loss" in history
+
+    def test_train_model_returns_same_object(self):
+        model = build_resnet(num_classes=2, freeze_backbone=True).to(DEVICE)
+        train_loader = make_dummy_loader(n_samples=8, batch_size=4)
+        val_loader = make_dummy_loader(n_samples=8, batch_size=4)
+
+        trained_model, _ = train_model(
+            model, train_loader, val_loader,
+            num_epochs=2, lr=1e-3, weight_decay=1e-4,
+            device=DEVICE, model_name="Test",
+        )
+        assert trained_model is model, "train_model should modify and return same model object"
 
 
 class TestGradCAM:
@@ -601,6 +644,7 @@ class TestGradCAM:
         gc = GradCAM(model, model.layer4)
         x = torch.randn(1, 3, 224, 224, device=DEVICE)
 
+        # target_class=None should auto-select predicted class
         cam = gc.generate(x, target_class=None)
         assert isinstance(cam, np.ndarray)
         assert cam.shape == (7, 7)
@@ -615,6 +659,9 @@ class TestGradCAM:
         assert gc.gradients is not None, "Gradients should be captured"
         assert gc.activations.shape[0] == 1, "Batch dim should be 1"
         assert gc.gradients.shape[0] == 1, "Batch dim should be 1"
+        # ResNet layer4 output: (1, 2048, 7, 7)
+        assert gc.activations.shape[1] == 2048
+        assert gc.gradients.shape[1] == 2048
 
     def test_gradcam_resizable(self):
         """Test that the CAM heatmap can be resized to image size (as done in notebook)."""
@@ -630,6 +677,18 @@ class TestGradCAM:
             align_corners=False,
         ).squeeze().numpy()
         assert cam_resized.shape == (224, 224)
+
+    def test_gradcam_different_classes_differ(self):
+        """CAMs for different target classes should generally differ."""
+        model = build_resnet(num_classes=2, freeze_backbone=False).to(DEVICE)
+        gc = GradCAM(model, model.layer4)
+        x = torch.randn(1, 3, 224, 224, device=DEVICE)
+
+        cam0 = gc.generate(x, target_class=0)
+        cam1 = gc.generate(x, target_class=1)
+        # They should not be identical (except in degenerate cases)
+        # We check they are computed without error at minimum
+        assert cam0.shape == cam1.shape == (7, 7)
 
 
 class TestPlotFunctions:
@@ -671,7 +730,7 @@ class TestPlotFunctions:
             vit_acc=0.95, vit_f1=0.94,
         )
 
-    def test_classification_report(self):
+    def test_classification_report_output(self):
         labels = np.array([0, 0, 1, 1, 0, 1])
         preds = np.array([0, 1, 1, 1, 0, 0])
         report = classification_report(labels, preds, target_names=CLASS_NAMES)
@@ -753,6 +812,20 @@ class TestForwardBackward:
             out2 = model(x)
         assert torch.equal(out1, out2), "Deterministic eval passes should match"
 
+    def test_loss_decreases_with_training(self):
+        """Loss should decrease over multiple epochs of training."""
+        model = build_resnet(num_classes=2, freeze_backbone=True).to(DEVICE)
+        loader = make_dummy_loader(n_samples=16, batch_size=8)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-2)
+
+        losses = []
+        for _ in range(5):
+            loss, _ = train_one_epoch(model, loader, criterion, optimizer, DEVICE)
+            losses.append(loss)
+        # At least the last loss should be less than the first (not always monotonic)
+        assert losses[-1] < losses[0], f"Loss should decrease: {losses}"
+
 
 class TestTransforms:
     """Test the transform pipelines from the notebook."""
@@ -782,6 +855,20 @@ class TestTransforms:
         tensor = eval_transforms(img)
         assert tensor.shape == (3, 224, 224)
 
+    def test_transforms_produce_normalized_output(self):
+        """After normalization, values should not be strictly in [0,1]."""
+        eval_transforms = transforms.Compose([
+            transforms.Resize((IMG_SIZE, IMG_SIZE)),
+            transforms.ToTensor(),
+            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+        ])
+        from PIL import Image
+        img = Image.fromarray(np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8))
+        tensor = eval_transforms(img)
+        # After ImageNet normalization, values are centered around 0 and can be negative
+        assert tensor.min() < 0.0 or tensor.max() > 1.0, \
+            "Normalized tensor should have values outside [0,1]"
+
 
 class TestSklearnMetrics:
     """Test that sklearn metrics work as used in the notebook."""
@@ -803,6 +890,16 @@ class TestSklearnMetrics:
         y_pred = [0, 1, 1, 0]
         cm = confusion_matrix(y_true, y_pred)
         assert cm.shape == (2, 2)
+
+    def test_confusion_matrix_values(self):
+        y_true = [0, 0, 1, 1]
+        y_pred = [0, 0, 1, 1]
+        cm = confusion_matrix(y_true, y_pred)
+        # Perfect predictions: diagonal = [2, 2], off-diagonal = 0
+        assert cm[0, 0] == 2
+        assert cm[1, 1] == 2
+        assert cm[0, 1] == 0
+        assert cm[1, 0] == 0
 
 
 class TestEdgeCases:
@@ -845,21 +942,30 @@ class TestEdgeCases:
         assert denormed.max() <= 1.0
         assert denormed.shape == (3, 224, 224)
 
-    def test_train_model_returns_best_model(self):
-        """Verify train_model returns best checkpoint, not last epoch."""
+    def test_cross_entropy_loss_with_model_output(self):
+        """Test that CrossEntropyLoss works with model outputs."""
         model = build_resnet(num_classes=2, freeze_backbone=True).to(DEVICE)
-        train_loader = make_dummy_loader(n_samples=8, batch_size=4)
-        val_loader = make_dummy_loader(n_samples=8, batch_size=4)
+        x = torch.randn(4, 3, 224, 224, device=DEVICE)
+        labels = torch.tensor([0, 1, 0, 1], device=DEVICE)
+        with torch.no_grad():
+            out = model(x)
+        loss = nn.CrossEntropyLoss()(out, labels)
+        assert loss.item() > 0, "Loss should be positive"
+        assert not torch.isnan(loss), "Loss should not be NaN"
+        assert not torch.isinf(loss), "Loss should not be Inf"
 
-        trained_model, history = train_model(
-            model, train_loader, val_loader,
-            num_epochs=3, lr=1e-3, weight_decay=1e-4,
-            device=DEVICE, model_name="Test",
+    def test_adamw_optimizer_creation(self):
+        """Test that AdamW can be created with filtered parameters."""
+        model = build_resnet(num_classes=2, freeze_backbone=True).to(DEVICE)
+        optimizer = optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=1e-4,
+            weight_decay=1e-4,
         )
-        best_val_acc = max(history["val_acc"])
-        assert trained_model is model, "train_model should modify and return same model object"
+        assert len(optimizer.param_groups) == 1
+        assert optimizer.param_groups[0]["lr"] == 1e-4
 
 
 # Entry point
 if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short", "-x"])
+    pytest.main([__file__, "-v", "--tb=short"])

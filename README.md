@@ -121,7 +121,7 @@ Checkpointing:  Best model by validation accuracy
   <img src="assets/training_curves.png" alt="Training Curves" width="100%"/>
 </p>
 
-Both models converge smoothly with minimal overfitting, confirming that frozen backbone + fine-tuned head is an effective strategy for this dataset size.
+Both models converge within 10 epochs. ViT-B/16 trains faster and achieves lower final loss, while ResNet-50 shows a more gradual convergence. The gap between train and validation curves reflects the extremely small validation set (16 samples), which introduces noise in validation metrics.
 
 ### Test Performance
 
@@ -129,12 +129,21 @@ Both models converge smoothly with minimal overfitting, confirming that frozen b
   <img src="assets/metric_comparison.png" alt="Metric Comparison" width="85%"/>
 </p>
 
-| Model | Accuracy | F1-Score | Precision | Recall | Loss |
-|-------|----------|----------|-----------|--------|------|
-| **ResNet-50** | 96.47% | 96.41% | 95.80% | 96.47% | 0.115 |
-| **ViT-B/16** | 96.63% | 96.58% | 95.53% | 96.63% | 0.117 |
+| Model | Accuracy | F1-Score (weighted) | Loss |
+|-------|----------|---------------------|------|
+| **ResNet-50** | 83.17% | 82.81% | 0.394 |
+| **ViT-B/16** | 82.85% | 81.83% | 0.386 |
 
-> Both architectures achieve **>96% accuracy** through transfer learning. ViT-B/16 edges ahead slightly in overall accuracy, while ResNet-50 shows marginally better precision.
+Both architectures achieve comparable overall accuracy (~83%) using **only classification head fine-tuning** (~2-4K trainable parameters out of millions). The per-class breakdown reveals important differences:
+
+| Model | | Precision | Recall | F1-Score | Support |
+|-------|---------|-----------|--------|----------|---------|
+| **ResNet-50** | NORMAL | 0.83 | 0.69 | 0.76 | 234 |
+| | PNEUMONIA | 0.83 | 0.92 | 0.87 | 390 |
+| **ViT-B/16** | NORMAL | 0.92 | 0.59 | 0.72 | 234 |
+| | PNEUMONIA | 0.80 | 0.97 | 0.88 | 390 |
+
+> **Key insight:** ViT-B/16 is more **conservative** — it achieves 92% precision on NORMAL (few false "healthy" labels) and 97% recall on PNEUMONIA (misses almost no disease cases). ResNet-50 is more **balanced** across classes. For clinical screening where missing pneumonia is dangerous, ViT's high pneumonia recall (97%) is particularly valuable.
 
 ### Confusion Matrices
 
@@ -143,9 +152,9 @@ Both models converge smoothly with minimal overfitting, confirming that frozen b
 </p>
 
 Key observations:
-- Both models have **high true positive rates** for pneumonia detection (critical for clinical use)
-- **False negatives** (missed pneumonia) are minimal — essential for screening applications
-- ResNet-50 has slightly fewer false positives on normal cases
+- **ViT-B/16 misses only ~3% of pneumonia cases** (12 false negatives out of 390) — critical for screening
+- **ResNet-50 is more balanced**, with 69% recall on NORMAL vs ViT's 59%
+- Both models show a bias toward predicting PNEUMONIA, reflecting the **3:1 class imbalance** in the training set (3,875 pneumonia vs 1,341 normal)
 
 ### Model Complexity
 
@@ -153,7 +162,13 @@ Key observations:
   <img src="assets/model_complexity.png" alt="Model Complexity" width="85%"/>
 </p>
 
-ResNet-50 is **3.7x more parameter-efficient** — achieving comparable accuracy with 23.5M vs 86.6M parameters. For resource-constrained deployment (edge devices, hospital systems), this efficiency advantage is significant.
+| | ResNet-50 | ViT-B/16 |
+|---|-----------|----------|
+| **Total parameters** | 23.5M | 85.8M |
+| **Trainable parameters** | 4,098 | 1,538 |
+| **Trainable ratio** | 0.017% | 0.002% |
+
+ResNet-50 is **3.7x more parameter-efficient** overall. Interestingly, ViT achieves comparable performance with even fewer trainable parameters (1.5K vs 4K), suggesting its pre-trained representations transfer more efficiently to this task.
 
 ---
 
@@ -183,20 +198,25 @@ ResNet-50 is **3.7x more parameter-efficient** — achieving comparable accuracy
 
 ## Key Findings
 
-### 1. Transfer Learning Equalizes the Playing Field
-With frozen ImageNet backbones and only classification heads fine-tuned (~2-4K parameters), both architectures achieve **>96% accuracy**. The rich feature representations learned on ImageNet transfer remarkably well to grayscale medical images.
+### 1. Transfer Learning Is Remarkably Effective
+With frozen ImageNet backbones and only classification heads fine-tuned (~2-4K parameters), both architectures achieve **~83% accuracy** on chest X-ray classification. This demonstrates that ImageNet features transfer well even to grayscale medical images — with only 0.002-0.017% of parameters trained.
 
-### 2. CNN Wins on Efficiency
-ResNet-50 achieves nearly identical accuracy with **3.7x fewer parameters**, making it the practical choice for deployment in resource-constrained clinical environments.
+### 2. Different Architectures, Different Clinical Profiles
+While overall accuracy is similar, the models exhibit **distinct error profiles**:
+- **ViT-B/16** strongly favors pneumonia detection (97% recall) at the cost of over-diagnosing normal cases — ideal for **screening** where missed disease is unacceptable
+- **ResNet-50** is more balanced across classes — better suited for **diagnostic** contexts where both false positives and false negatives matter
 
-### 3. ViT Shows Promise Despite Small Data
-Conventionally, transformers need large datasets to outperform CNNs. Here, ViT-B/16 **matches ResNet-50** even on ~5K training images — entirely due to strong ImageNet pre-training bridging the data gap.
+### 3. CNN Wins on Efficiency
+ResNet-50 achieves comparable accuracy with **3.7x fewer total parameters**, making it the practical choice for deployment in resource-constrained clinical environments (edge devices, hospital systems).
 
-### 4. Interpretability is Non-Negotiable
-Grad-CAM demonstrates that the CNN attends to **clinically meaningful regions**. For real-world medical AI deployment, this interpretability is as important as raw accuracy metrics.
+### 4. ViT Matches CNN Despite Small Data
+Conventionally, transformers need large datasets to outperform CNNs. Here, ViT-B/16 **matches ResNet-50** on ~5K training images — entirely due to strong ImageNet pre-training bridging the data gap.
 
-### 5. Both Models Excel at Minimizing False Negatives
-In medical screening, **missing a positive case (false negative)** is far more dangerous than a false alarm. Both models achieve high recall, making them suitable for screening applications.
+### 5. Interpretability is Non-Negotiable
+Grad-CAM demonstrates that ResNet-50 attends to **clinically meaningful lung regions**. For real-world medical AI deployment, this interpretability is as important as raw accuracy metrics.
+
+### 6. Dataset Limitations Shape Results
+The training set has a **3:1 class imbalance** (pneumonia vs normal) and the validation set contains only **16 samples** — both of which influence model behavior. These are well-known limitations of this benchmark dataset and highlight the importance of careful dataset curation in medical AI.
 
 ---
 
@@ -244,6 +264,7 @@ Technion_Project/
 ├── CNN_vs_ViT_Medical_Image_Classification.ipynb   # Main experiment notebook
 ├── README.md                                        # This file
 ├── assets/
+│   ├── CNN_vs_ViT_Medical_Image_Classification (1).ipynb  # Executed notebook with outputs
 │   ├── generate_readme_assets.py                    # Script to regenerate charts
 │   ├── architecture_comparison.png                  # Architecture diagram
 │   ├── training_curves.png                          # Loss & accuracy curves
